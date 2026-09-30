@@ -4,7 +4,7 @@ Ask questions about public companies' annual reports and get concise answers whe
 
 FinSight is a tool-using AI agent: it decides which filings to search, runs semantic retrieval over SEC 10-K text, and writes a cited answer. It ships with guardrails against prompt injection and investment-advice requests, live token and cost tracking, and an evaluation harness that gates releases.
 
-**Live demo:** _add your Vercel URL here_
+**Live demo:** https://finsight-bhavitha.vercel.app
 
 ![FinSight screenshot](docs/screenshot.png)
 
