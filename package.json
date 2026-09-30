@@ -1,0 +1,39 @@
+{
+  "name": "finsight",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "ingest": "node --env-file=.env.local --import tsx scripts/ingest.ts",
+    "eval": "node --env-file=.env.local --import tsx scripts/eval.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.83",
+    "@ai-sdk/react": "^4.0.127",
+    "ai": "^7.0.124",
+    "geist": "^1.7.2",
+    "next": "15.5.27",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^22.20.4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.27",
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}
