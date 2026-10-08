@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { parseBlocks, parseInline } from "@/lib/markdown";
 import type { ChatMetadata } from "./api/chat/route";
 
@@ -12,11 +12,16 @@ type Msg = UIMessage<ChatMetadata>;
 const EXAMPLES = [
   "What are Apple's biggest supply chain risks?",
   "Compare how Microsoft and NVIDIA describe competition in AI.",
-  "How does NVIDIA describe its dependence on a few customers?",
-  "Which companies are in the index?",
+  "How did NVIDIA's export-control risk disclosures change from fiscal 2024 to 2025?",
+  "Which companies and fiscal years are in the index?",
 ];
 
-type AnyToolPart = { type: string; state?: string; input?: { query?: string; tickers?: string[] }; output?: unknown };
+type AnyToolPart = {
+  type: string;
+  state?: string;
+  input?: { query?: string; tickers?: string[]; fiscalYears?: string[] };
+  output?: unknown;
+};
 
 function passagesFrom(message: Msg): Map<string, Passage> {
   const map = new Map<string, Passage>();
@@ -78,10 +83,12 @@ function ToolStep({ part }: { part: AnyToolPart }) {
   if (part.type === "tool-searchFilings") {
     const q = part.input?.query;
     const t = part.input?.tickers?.length ? ` in ${part.input.tickers.join(", ")}` : "";
+    const y = part.input?.fiscalYears?.length ? ` · FY${part.input.fiscalYears.join(", FY")}` : "";
     const n = done && Array.isArray(part.output) ? ` · ${part.output.length} passages` : "";
     return (
       <div className="step">
-        {done ? "✓" : "…"} Searched filings{t}: <em>{q ?? "…"}</em>
+        {done ? "✓" : "…"} Searched filings{t}
+        {y}: <em>{q ?? "…"}</em>
         {n}
       </div>
     );
@@ -92,6 +99,15 @@ function ToolStep({ part }: { part: AnyToolPart }) {
 export default function Home() {
   const [input, setInput] = useState("");
   const [cited, setCited] = useState<Passage | null>(null);
+  const [years, setYears] = useState<string[]>([]);
+  const [year, setYear] = useState("all");
+
+  useEffect(() => {
+    fetch("/api/filings")
+      .then((r) => r.json())
+      .then((d: { years?: string[] }) => setYears(d.years ?? []))
+      .catch(() => setYears([]));
+  }, []);
   const { messages, sendMessage, status, error, stop } = useChat<Msg>({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
@@ -113,7 +129,7 @@ export default function Home() {
   const ask = (text: string) => {
     const q = text.trim();
     if (!q || busy) return;
-    sendMessage({ text: q });
+    sendMessage({ text: q }, { body: { fiscalYears: year === "all" ? [] : [year] } });
     setInput("");
   };
 
@@ -124,11 +140,26 @@ export default function Home() {
           <h1>FinSight</h1>
           <p className="tag">An agentic RAG analyst for SEC 10-K filings, with cited answers.</p>
         </div>
-        {totals.tokens > 0 && (
-          <div className="usage" title="Tokens and estimated OpenAI cost for this session">
-            {totals.tokens.toLocaleString()} tokens · ${totals.cost.toFixed(4)}
-          </div>
-        )}
+        <div className="controls">
+          {years.length > 0 && (
+            <label className="year">
+              Fiscal year
+              <select value={year} onChange={(e) => setYear(e.target.value)} aria-label="Fiscal year filter">
+                <option value="all">All years</option>
+                {years.map((y) => (
+                  <option key={y} value={y}>
+                    FY{y}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {totals.tokens > 0 && (
+            <div className="usage" title="Tokens and estimated OpenAI cost for this session">
+              {totals.tokens.toLocaleString()} tokens · ${totals.cost.toFixed(4)}
+            </div>
+          )}
+        </div>
       </header>
 
       <section className="thread">
@@ -164,6 +195,7 @@ export default function Home() {
               {m.metadata?.usage && (
                 <div className="meta">
                   {m.metadata.model} · {m.metadata.usage.inputTokens + m.metadata.usage.outputTokens} tokens
+                  {m.metadata.fiscalYears?.length ? ` · FY${m.metadata.fiscalYears.join(", FY")} only` : ""}
                   {m.metadata.usage.estimatedCostUsd !== null && ` · $${m.metadata.usage.estimatedCostUsd.toFixed(5)}`}
                 </div>
               )}

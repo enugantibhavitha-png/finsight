@@ -21,7 +21,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      # Retrieval + safety evals run only when the repo has an OPENAI_API_KEY secret.
+      # Retrieval, safety, answer and faithfulness evals run only when the repo has an OPENAI_API_KEY secret.
+      # Costs about one cent per run with gpt-4o-mini.
       - name: Evals (quality gate)
         if: ${{ env.OPENAI_API_KEY != '' }}
-        run: touch .env.local && npm run eval
+        run: touch .env.local && npm run eval -- --answers

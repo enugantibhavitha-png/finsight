@@ -1,5 +1,7 @@
 // Central configuration. Values can be overridden with environment variables.
 export const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini";
+// Model used as the judge in the faithfulness eval. A stronger model (e.g. gpt-4o) is a stricter judge.
+export const JUDGE_MODEL = process.env.OPENAI_JUDGE_MODEL ?? "gpt-4o-mini";
 export const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
 
 // Smaller vectors keep the index file small enough to ship with the app.

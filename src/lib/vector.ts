@@ -32,20 +32,31 @@ export function cosine(a: number[], b: number[]): number {
   return na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+export type SearchOptions = { k?: number; tickers?: string[]; fiscalYears?: string[] };
+
 /** Brute-force similarity search. Fast enough for a few thousand chunks. */
-export function search(
-  index: FilingIndex,
-  queryEmbedding: number[],
-  opts: { k?: number; tickers?: string[] } = {},
-): SearchHit[] {
+export function search(index: FilingIndex, queryEmbedding: number[], opts: SearchOptions = {}): SearchHit[] {
   const k = opts.k ?? 6;
   const allowed = opts.tickers?.length ? new Set(opts.tickers.map((t) => t.toUpperCase())) : null;
+  const years = opts.fiscalYears?.length ? new Set(opts.fiscalYears.map(normalizeYear)) : null;
   return index.chunks
     .filter((c) => !allowed || allowed.has(c.ticker))
+    .filter((c) => !years || years.has(c.fiscalYear))
     .map((c) => {
       const { embedding, ...rest } = c;
       return { ...rest, score: cosine(queryEmbedding, embedding) };
     })
     .sort((x, y) => y.score - x.score)
     .slice(0, k);
+}
+
+/** Accept "2024", "FY2024", "fy24" or "24" and return "2024". */
+export function normalizeYear(y: string): string {
+  const digits = y.replace(/\D/g, "");
+  return digits.length === 2 ? `20${digits}` : digits;
+}
+
+/** Fiscal years present in the index, newest first. */
+export function availableYears(index: FilingIndex): string[] {
+  return [...new Set(index.companies.map((c) => c.fiscalYear))].sort().reverse();
 }

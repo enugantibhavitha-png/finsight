@@ -1,8 +1,9 @@
 /**
  * Minimal Markdown parser for model answers: headings, bullet and numbered
- * lists, paragraphs, **bold**, *italic*, `code`, and [TICKER-0000] citations.
+ * lists, paragraphs, **bold**, *italic*, `code`, and [TICKER-FY25-0000] citations.
  * Kept dependency-free and pure so it is easy to unit test.
  */
+import { CHUNK_ID_PATTERN } from "./citations";
 
 export type Inline =
   | { type: "text"; value: string }
@@ -65,7 +66,18 @@ export function parseBlocks(markdown: string): Block[] {
   return blocks;
 }
 
-const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[A-Z.]{1,6}-\d{4}\]|\*[^*\s][^*]*\*)/g;
+const INLINE = new RegExp(
+  "(" +
+    [
+      String.raw`\*\*[^*]+\*\*`, // **bold**
+      "__[^_]+__", // __bold__
+      "`[^`]+`", // `code`
+      String.raw`\[${CHUNK_ID_PATTERN}\]`, // [AAPL-FY25-0042]
+      String.raw`\*[^*\s][^*]*\*`, // *italic*
+    ].join("|") +
+    ")",
+  "g",
+);
 
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];

@@ -1,7 +1,8 @@
 /**
  * Evaluation harness.
  *   npm run eval            -> retrieval + safety evals (cheap: embeddings only)
- *   npm run eval -- --answers -> also runs the full agent on answer cases
+ *   npm run eval -- --answers -> also runs the full agent on answer cases and
+ *                                checks faithfulness (LLM judge + number grounding)
  *
  * Exits with code 1 if results fall below the thresholds, so it can gate CI.
  */
@@ -9,18 +10,20 @@ import { openai } from "@ai-sdk/openai";
 import { generateText, stepCountIs } from "ai";
 import { readFileSync, writeFileSync } from "node:fs";
 import { SYSTEM_PROMPT, ADVICE_NOTE, tools } from "../src/lib/agent";
-import { CHAT_MODEL, DEFAULT_TOP_K, MAX_AGENT_STEPS } from "../src/lib/config";
+import { extractCitations } from "../src/lib/citations";
+import { CHAT_MODEL, DEFAULT_TOP_K, JUDGE_MODEL, MAX_AGENT_STEPS } from "../src/lib/config";
 import { summarizeUsage } from "../src/lib/cost";
 import { embedQuery } from "../src/lib/embed";
+import { extractClaims, judgeClaim, ungroundedNumbers, VERDICT_SCORE } from "../src/lib/faithfulness";
 import { checkInput, isAdviceRequest } from "../src/lib/guardrails";
 import { loadIndex } from "../src/lib/index-store";
-import { search } from "../src/lib/vector";
+import { availableYears, search } from "../src/lib/vector";
 
-const THRESHOLDS = { hitRate: 0.8, mrr: 0.5, answerPass: 0.66 };
+const THRESHOLDS = { hitRate: 0.8, mrr: 0.5, answerPass: 0.66, faithfulness: 0.85 };
 
 type Golden = {
-  retrieval: { question: string; ticker: string; keywords: string[] }[];
-  answers: { question: string; mustCite?: string[]; mustInclude?: string[] }[];
+  retrieval: { question: string; ticker: string; fiscalYear?: string; keywords: string[] }[];
+  answers: { question: string; mustCite?: string[]; mustCiteYears?: string[]; mustInclude?: string[] }[];
   safety: { question: string; expectBlocked: boolean }[];
 };
 
@@ -31,21 +34,29 @@ async function retrievalEval() {
   const index = loadIndex();
   if (!index.chunks.length) throw new Error("Index is empty. Run `npm run ingest` first.");
   const available = new Set(index.companies.map((c) => c.ticker));
-  const cases = golden.retrieval.filter((c) => available.has(c.ticker));
+  const years = new Set(availableYears(index));
+  const cases = golden.retrieval.filter((c) => available.has(c.ticker) && (!c.fiscalYear || years.has(c.fiscalYear)));
 
   let hits = 0;
   let rrSum = 0;
   const rows = [];
   for (const c of cases) {
-    const results = search(index, await embedQuery(c.question), { k: DEFAULT_TOP_K });
+    const results = search(index, await embedQuery(c.question), {
+      k: DEFAULT_TOP_K,
+      fiscalYears: c.fiscalYear ? [c.fiscalYear] : undefined,
+    });
     const rank = results.findIndex(
-      (r) => r.ticker === c.ticker && c.keywords.some((k) => r.text.toLowerCase().includes(k.toLowerCase())),
+      (r) =>
+        r.ticker === c.ticker &&
+        (!c.fiscalYear || r.fiscalYear === c.fiscalYear) &&
+        c.keywords.some((k) => r.text.toLowerCase().includes(k.toLowerCase())),
     );
     if (rank >= 0) {
       hits++;
       rrSum += 1 / (rank + 1);
     }
-    rows.push({ question: c.question, expected: c.ticker, rank: rank >= 0 ? rank + 1 : "miss", top: results[0]?.id });
+    const expected = c.fiscalYear ? `${c.ticker} FY${c.fiscalYear}` : c.ticker;
+    rows.push({ question: c.question, expected, rank: rank >= 0 ? rank + 1 : "miss", top: results[0]?.id });
   }
   const hitRate = cases.length ? hits / cases.length : 0;
   const mrr = cases.length ? rrSum / cases.length : 0;
@@ -66,9 +77,14 @@ function safetyEval() {
 }
 
 async function answerEval() {
-  const validIds = new Set(loadIndex().chunks.map((c) => c.id));
+  const byId = new Map(loadIndex().chunks.map((c) => [c.id, c]));
   const rows = [];
+  const unsupportedClaims: { question: string; claim: string; citations: string[]; verdict: string; reason: string }[] = [];
   let totalCost = 0;
+  let scoreSum = 0;
+  let claimCount = 0;
+  let ungroundedTotal = 0;
+
   for (const c of golden.answers) {
     const started = Date.now();
     const result = await generateText({
@@ -79,26 +95,69 @@ async function answerEval() {
       stopWhen: stepCountIs(MAX_AGENT_STEPS),
       temperature: 0,
     });
+    const latencyMs = Date.now() - started;
     const text = result.text;
-    const cited = [...text.matchAll(/\[([A-Z.]{1,6}-\d{4})\]/g)].map((m) => m[1]);
-    const invalid = cited.filter((id) => !validIds.has(id));
+    const cited = extractCitations(text);
+    const invalid = cited.filter((id) => !byId.has(id));
     const citesOk = (c.mustCite ?? []).every((t) => cited.some((id) => id.startsWith(`${t}-`)));
+    const yearsOk = (c.mustCiteYears ?? []).every((y) => cited.some((id) => byId.get(id)?.fiscalYear === y));
     const includesOk = (c.mustInclude ?? []).every((s) => text.toLowerCase().includes(s.toLowerCase()));
     const usage = summarizeUsage(CHAT_MODEL, result.totalUsage);
     totalCost += usage.estimatedCostUsd ?? 0;
+
+    // Faithfulness: judge every cited claim against the passages it cites.
+    const { cited: claims } = extractClaims(text);
+    const verdicts = await Promise.all(
+      claims.map(async (cl) => {
+        const passages = cl.citations.flatMap((id) => {
+          const chunk = byId.get(id);
+          return chunk ? [{ id, text: chunk.text }] : [];
+        });
+        const numbers = ungroundedNumbers(cl.claim, passages.map((p) => p.text));
+        if (!passages.length) return { cl, verdict: "unsupported" as const, reason: "cites no valid passage", numbers };
+        const j = await judgeClaim(cl.claim, passages);
+        totalCost += summarizeUsage(JUDGE_MODEL, j.usage).estimatedCostUsd ?? 0;
+        return { cl, verdict: j.verdict, reason: j.reason, numbers };
+      }),
+    );
+    const answerScore = verdicts.length
+      ? verdicts.reduce((sum, v) => sum + VERDICT_SCORE[v.verdict], 0) / verdicts.length
+      : null;
+    scoreSum += verdicts.reduce((sum, v) => sum + VERDICT_SCORE[v.verdict], 0);
+    claimCount += verdicts.length;
+    const ungrounded = verdicts.flatMap((v) => v.numbers);
+    ungroundedTotal += ungrounded.length;
+    for (const v of verdicts) {
+      if (v.verdict !== "supported") {
+        unsupportedClaims.push({ question: c.question, claim: v.cl.claim, citations: v.cl.citations, verdict: v.verdict, reason: v.reason });
+      }
+    }
+
     rows.push({
       question: c.question,
       citations: cited.length,
       invalidCitations: invalid.length,
-      pass: citesOk && includesOk && invalid.length === 0,
-      latencyMs: Date.now() - started,
+      claims: verdicts.length,
+      faithfulness: answerScore === null ? "n/a" : Number(answerScore.toFixed(2)),
+      ungroundedNumbers: ungrounded.join(" ") || "-",
+      pass: citesOk && yearsOk && includesOk && invalid.length === 0,
+      latencyMs,
       tokens: usage.inputTokens + usage.outputTokens,
     });
   }
   console.table(rows);
   const passRate = rows.filter((r) => r.pass).length / rows.length;
-  console.log(`Answers: ${(passRate * 100).toFixed(0)}% pass, est. cost $${totalCost.toFixed(4)}`);
-  return { passRate, rows };
+  const faithfulness = claimCount ? scoreSum / claimCount : 1;
+  console.log(`Answers: ${(passRate * 100).toFixed(0)}% pass, est. cost $${totalCost.toFixed(4)} (incl. judge)`);
+  console.log(
+    `Faithfulness: ${(faithfulness * 100).toFixed(0)}% of ${claimCount} cited claims supported (judge: ${JUDGE_MODEL}), ` +
+      `${ungroundedTotal} number(s) not found in cited passages`,
+  );
+  if (unsupportedClaims.length) {
+    console.log("\nClaims the judge did not fully support:");
+    for (const u of unsupportedClaims) console.log(`  - [${u.verdict}] ${u.claim} (${u.citations.join(", ")}): ${u.reason}`);
+  }
+  return { passRate, faithfulness, claimCount, ungroundedNumbers: ungroundedTotal, unsupportedClaims, rows };
 }
 
 async function main() {
@@ -113,6 +172,9 @@ async function main() {
   if (retrieval.mrr < THRESHOLDS.mrr) failures.push(`MRR ${retrieval.mrr.toFixed(2)} < ${THRESHOLDS.mrr}`);
   if (safety.passRate < 1) failures.push("safety cases failed");
   if (answers && answers.passRate < THRESHOLDS.answerPass) failures.push(`answer pass ${answers.passRate.toFixed(2)} < ${THRESHOLDS.answerPass}`);
+  if (answers && answers.faithfulness < THRESHOLDS.faithfulness) {
+    failures.push(`faithfulness ${answers.faithfulness.toFixed(2)} < ${THRESHOLDS.faithfulness}`);
+  }
 
   if (failures.length) {
     console.error(`\nEVAL FAILED: ${failures.join("; ")}`);

@@ -40,6 +40,14 @@ describe("parseInline", () => {
     ]);
   });
 
+  it("parses fiscal-year citation ids", () => {
+    expect(parseInline("Risk [AAPL-FY24-0042].")).toEqual([
+      { type: "text", value: "Risk " },
+      { type: "cite", value: "AAPL-FY24-0042" },
+      { type: "text", value: "." },
+    ]);
+  });
+
   it("leaves plain text and non-citation brackets alone", () => {
     expect(parseInline("costs [approx] 5 * 3")).toEqual([{ type: "text", value: "costs [approx] 5 * 3" }]);
   });
